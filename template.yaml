@@ -1,4 +1,3 @@
-
 AWSTemplateFormatVersion: '2010-09-09'
 Resources:
   # VPC
@@ -11,7 +10,8 @@ Resources:
       Tags:
         - Key: Name
           Value: snapshare-VPC
-  # Public Subnets
+  
+  # Public Subnets (for Load Balancer)
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -22,7 +22,7 @@ Resources:
       Tags:
         - Key: Name
           Value: PublicSubnet1
-  # Public submet 2
+
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
@@ -33,15 +33,57 @@ Resources:
       Tags:
         - Key: Name
           Value: PublicSubnet2
+  
+  # Private Subnets (for ECS)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet2
+  
   # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
+  
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
-  # Route Table
+  
+  # NAT Gateway for Private Subnets
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+  
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: NatGateway
+  
+  # Route Tables
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -49,6 +91,7 @@ Resources:
       Tags:
         - Key: Name
           Value: PublicRouteTable
+  
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
@@ -56,21 +99,53 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
+  
   PublicSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref PublicRouteTable
+  
   PublicSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
+  
+  # Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+  
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+  
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  
   # ECS Cluster
   SnapshareCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: SnapshareCluster
+  
   # Task Execution Role
   TaskExecutionRole:
     Type: AWS::IAM::Role
@@ -98,6 +173,7 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: '*'
+  
   S3AccessRole:
     Type: AWS::IAM::Role
     Properties:
@@ -112,6 +188,7 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  
   # CodeDeploy role for blue-green deployments
   CodeDeployServiceRole:
     Type: AWS::IAM::Role
@@ -127,11 +204,13 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+  
   # Create log group
   ECSLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: snapshare-log-group
+  
   # ECS Task Definition 
   ECSTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -156,6 +235,7 @@ Resources:
               awslogs-group: snapshare-log-group
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
+  
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -181,6 +261,7 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
+  
   ECSServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -194,6 +275,7 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
+  
   # Application Load Balancer
   SnapshareLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -206,6 +288,7 @@ Resources:
         - !Ref LoadBalancerSecurityGroup
       Scheme: internet-facing
       Type: application
+  
   # Production target group (initially blue environment)
   BlueTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -221,6 +304,7 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: "300"
+  
   # Green target group for new deployments
   GreenTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -236,6 +320,7 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: "300"
+  
   # Test listener for validation testing before switching traffic
   TestListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -246,6 +331,7 @@ Resources:
       LoadBalancerArn: !Ref SnapshareLoadBalancer
       Port: 8081
       Protocol: HTTP
+  
   # Production listener (initially points to blue environment)
   ProductionListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -256,6 +342,7 @@ Resources:
       LoadBalancerArn: !Ref SnapshareLoadBalancer
       Port: 80
       Protocol: HTTP
+  
   # ECS Service
   ECSService:
     Type: AWS::ECS::Service
@@ -270,9 +357,9 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           Subnets:
-            - !Ref PublicSubnet1
-            - !Ref PublicSubnet2
-          AssignPublicIp: ENABLED
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          AssignPublicIp: DISABLED
           SecurityGroups:
             - !Ref ECSServiceSecurityGroup
       LoadBalancers:
@@ -286,6 +373,7 @@ Resources:
     DependsOn:
       - ProductionListener
       - TestListener
+  
   # IAM Role for Auto Scaling
   ECSAutoScalingRole:
     Type: AWS::IAM::Role
@@ -318,6 +406,7 @@ Resources:
                   - cloudwatch:DeleteAlarms
                   - application-autoscaling:*
                 Resource: "*"
+  
   # Auto Scaling Target
   ECSAutoScalingTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
@@ -332,6 +421,7 @@ Resources:
       RoleARN: !GetAtt ECSAutoScalingRole.Arn
       ScalableDimension: ecs:service:DesiredCount
       ServiceNamespace: ecs
+  
   # Auto Scaling Policy
   ECSAutoScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
@@ -345,12 +435,14 @@ Resources:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         ScaleInCooldown: 60
         ScaleOutCooldown: 60
+  
   # CodeDeploy Application
   CodeDeployApplication:
     Type: AWS::CodeDeploy::Application
     Properties:
       ApplicationName: snapshare-application
       ComputePlatform: ECS
+  
   # CodeDeploy Deployment Group
   DeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
@@ -365,7 +457,6 @@ Resources:
       BlueGreenDeploymentConfiguration:
         DeploymentReadyOption:
           ActionOnTimeout: CONTINUE_DEPLOYMENT
-          # Removed the WaitTimeInMinutes parameter as it's causing the error
         TerminateBlueInstancesOnDeploymentSuccess:
           Action: TERMINATE
           TerminationWaitTimeInMinutes: 5
@@ -383,6 +474,7 @@ Resources:
             TargetGroups:
               - Name: !GetAtt BlueTargetGroup.TargetGroupName
               - Name: !GetAtt GreenTargetGroup.TargetGroupName
+
 Outputs:
   SnapshareLoadBalancerDNS:
     Description: The DNS name of the load balancer
